@@ -23,6 +23,7 @@ struct pixart_data {
 
     enum pixart_input_mode curr_mode;
     uint32_t curr_cpi;
+    uint32_t runtime_cpi; // ランタイムで変更可能な MOVE/SCROLL モードの CPI
     int32_t scroll_delta_x;
     int32_t scroll_delta_y;
 
