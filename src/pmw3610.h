@@ -135,6 +135,8 @@ extern "C" {
 #define PMW3610_SCROLL_Y_POSITIVE 1
 #endif
 
+int pmw3610_set_cpi_ext(const struct device *dev, uint32_t cpi);
+
 #ifdef __cplusplus
 }
 #endif
