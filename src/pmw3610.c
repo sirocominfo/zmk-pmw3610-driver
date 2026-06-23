@@ -327,6 +327,22 @@ static int set_cpi_if_needed(const struct device *dev, uint32_t cpi) {
     return 0;
 }
 
+/* ランタイムで MOVE/SCROLL モードの CPI を変更する公開API。
+ * 値は runtime_cpi に保持され、以降のポーリングでも維持される。 */
+int pmw3610_set_runtime_cpi(const struct device *dev, uint32_t cpi) {
+    struct pixart_data *data = dev->data;
+    int err = set_cpi(dev, cpi);
+    if (!err) {
+        data->runtime_cpi = cpi;
+    }
+    return err;
+}
+
+uint32_t pmw3610_get_runtime_cpi(const struct device *dev) {
+    struct pixart_data *data = dev->data;
+    return data->runtime_cpi;
+}
+
 /* Set sampling rate in each mode (in ms) */
 static int set_sample_time(const struct device *dev, uint8_t reg_addr, uint32_t sample_time) {
     uint32_t maxtime = 2550;
@@ -471,6 +487,8 @@ static int pmw3610_async_init_configure(const struct device *dev) {
 
     // cpi
     if (!err) {
+        struct pixart_data *data = dev->data;
+        data->runtime_cpi = CONFIG_PMW3610_CPI;
         err = set_cpi(dev, CONFIG_PMW3610_CPI);
     }
 
@@ -591,11 +609,11 @@ static int pmw3610_report_data(const struct device *dev) {
     bool input_mode_changed = data->curr_mode != input_mode;
     switch (input_mode) {
     case MOVE:
-        set_cpi_if_needed(dev, CONFIG_PMW3610_CPI);
+        set_cpi_if_needed(dev, data->runtime_cpi);
         dividor = CONFIG_PMW3610_CPI_DIVIDOR;
         break;
     case SCROLL:
-        set_cpi_if_needed(dev, CONFIG_PMW3610_CPI);
+        set_cpi_if_needed(dev, data->runtime_cpi);
         if (input_mode_changed) {
             data->scroll_delta_x = 0;
             data->scroll_delta_y = 0;

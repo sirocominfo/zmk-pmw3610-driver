@@ -96,6 +96,10 @@ extern "C" {
 #define PMW3610_MAX_CPI 3200
 #define PMW3610_MIN_CPI 200
 
+/* ランタイムCPI変更の公開API（外部モジュールから呼び出し可能） */
+int pmw3610_set_runtime_cpi(const struct device *dev, uint32_t cpi);
+uint32_t pmw3610_get_runtime_cpi(const struct device *dev);
+
 /* write command bit position */
 #define SPI_WRITE_BIT BIT(7)
 
