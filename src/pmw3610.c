@@ -811,10 +811,6 @@ static int pmw3610_init(const struct device *dev) {
     return err;
 }
 
-int pmw3610_set_cpi_ext(const struct device *dev, uint32_t cpi) {
-    return set_cpi(dev, cpi);
-}
-
 #define PMW3610_DEFINE(n)                                                                          \
     static struct pixart_data data##n;                                                             \
     static int32_t scroll_layers##n[] = DT_PROP(DT_DRV_INST(n), scroll_layers);                    \
@@ -843,3 +839,7 @@ int pmw3610_set_cpi_ext(const struct device *dev, uint32_t cpi) {
                           CONFIG_SENSOR_INIT_PRIORITY, NULL);
 
 DT_INST_FOREACH_STATUS_OKAY(PMW3610_DEFINE)
+
+int pmw3610_set_cpi_ext(const struct device *dev, uint32_t cpi) {
+    return set_cpi(dev, cpi);
+}
