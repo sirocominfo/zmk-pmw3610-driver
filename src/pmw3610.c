@@ -564,11 +564,13 @@ static void pmw3610_async_init(struct k_work *work) {
 #if AUTOMOUSE_LAYER > 0
 struct k_timer automouse_layer_timer;
 static bool automouse_triggered = false;
+/* オートマウスレイヤーの待ち時間。既定はKconfig値。BLE経由でランタイム変更可能。 */
+static uint32_t runtime_automouse_ms = CONFIG_PMW3610_AUTOMOUSE_TIMEOUT_MS;
 
 static void activate_automouse_layer() {
     automouse_triggered = true;
     zmk_keymap_layer_activate(AUTOMOUSE_LAYER, false);
-    k_timer_start(&automouse_layer_timer, K_MSEC(CONFIG_PMW3610_AUTOMOUSE_TIMEOUT_MS), K_NO_WAIT);
+    k_timer_start(&automouse_layer_timer, K_MSEC(runtime_automouse_ms), K_NO_WAIT);
 }
 
 static void deactivate_automouse_layer(struct k_timer *timer) {
@@ -578,6 +580,26 @@ static void deactivate_automouse_layer(struct k_timer *timer) {
 
 K_TIMER_DEFINE(automouse_layer_timer, deactivate_automouse_layer, NULL);
 #endif
+
+/* オートマウス待ち時間のランタイム変更API（外部モジュールから呼ぶ）。
+ * AUTOMOUSE_LAYER 無効時は何もしない（シンボルは常に存在させてリンクを保つ）。 */
+void pmw3610_set_runtime_automouse_ms(const struct device *dev, uint32_t ms) {
+    ARG_UNUSED(dev);
+#if AUTOMOUSE_LAYER > 0
+    runtime_automouse_ms = ms;
+#else
+    ARG_UNUSED(ms);
+#endif
+}
+
+uint32_t pmw3610_get_runtime_automouse_ms(const struct device *dev) {
+    ARG_UNUSED(dev);
+#if AUTOMOUSE_LAYER > 0
+    return runtime_automouse_ms;
+#else
+    return 0;
+#endif
+}
 
 static enum pixart_input_mode get_input_mode_for_current_layer(const struct device *dev) {
     const struct pixart_config *config = dev->config;
