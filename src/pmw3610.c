@@ -343,6 +343,24 @@ uint32_t pmw3610_get_runtime_cpi(const struct device *dev) {
     return data->runtime_cpi;
 }
 
+/* ランタイムで軸の回転角(度)を変更する公開API。45度刻み(0/45/.../315)を想定。
+ * 座標変換(orientation/invert)の直後に回転行列を適用する。0=無回転。 */
+void pmw3610_set_runtime_rotation(const struct device *dev, int16_t deg) {
+    struct pixart_data *data = dev->data;
+    deg %= 360;
+    if (deg < 0) {
+        deg += 360;
+    }
+    data->runtime_rotation = deg;
+    data->rot_rem_x = 0; /* 角度変更時は端数をリセット */
+    data->rot_rem_y = 0;
+}
+
+int16_t pmw3610_get_runtime_rotation(const struct device *dev) {
+    struct pixart_data *data = dev->data;
+    return data->runtime_rotation;
+}
+
 /* Set sampling rate in each mode (in ms) */
 static int set_sample_time(const struct device *dev, uint8_t reg_addr, uint32_t sample_time) {
     uint32_t maxtime = 2550;
@@ -489,6 +507,9 @@ static int pmw3610_async_init_configure(const struct device *dev) {
     if (!err) {
         struct pixart_data *data = dev->data;
         data->runtime_cpi = CONFIG_PMW3610_CPI;
+        data->runtime_rotation = 0; /* 既定は無回転。起動後にファームが保存値を適用する */
+        data->rot_rem_x = 0;
+        data->rot_rem_y = 0;
         err = set_cpi(dev, CONFIG_PMW3610_CPI);
     }
 
@@ -693,6 +714,24 @@ static int pmw3610_report_data(const struct device *dev) {
 
     if (IS_ENABLED(CONFIG_PMW3610_INVERT_Y)) {
         y = -y;
+    }
+
+    /* ランタイム軸回転（45度刻み）。固定小数点(Q10=×1024)の cos/sin で回転行列を適用。
+     * 小さな delta でも精度が落ちないよう、切り捨て端数を次回へ繰り越す（ドリフト防止）。 */
+    if (data->runtime_rotation) {
+        static const int16_t cos_q10[8] = {1024, 724, 0, -724, -1024, -724, 0, 724};
+        static const int16_t sin_q10[8] = {0, 724, 1024, 724, 0, -724, -1024, -724};
+        int idx = ((data->runtime_rotation + 22) / 45) % 8; /* 最寄りの45度に丸める */
+        int32_t c = cos_q10[idx];
+        int32_t s = sin_q10[idx];
+        int32_t nx = (int32_t)x * c - (int32_t)y * s + data->rot_rem_x;
+        int32_t ny = (int32_t)x * s + (int32_t)y * c + data->rot_rem_y;
+        int16_t ox = (int16_t)(nx >> 10); /* /1024（負値も floor） */
+        int16_t oy = (int16_t)(ny >> 10);
+        data->rot_rem_x = nx - ((int32_t)ox << 10); /* 端数[0,1023]を繰り越し */
+        data->rot_rem_y = ny - ((int32_t)oy << 10);
+        x = ox;
+        y = oy;
     }
 
 #ifdef CONFIG_PMW3610_SMART_ALGORITHM
