@@ -24,6 +24,9 @@ struct pixart_data {
     enum pixart_input_mode curr_mode;
     uint32_t curr_cpi;
     uint32_t runtime_cpi; // ランタイムで変更可能な MOVE/SCROLL モードの CPI
+    int16_t runtime_rotation; // ランタイム軸回転（度。45刻みを想定。0=無回転）
+    int32_t rot_rem_x;        // 回転の端数（固定小数点の切り捨て分を次回へ繰り越しドリフト防止）
+    int32_t rot_rem_y;
     int32_t scroll_delta_x;
     int32_t scroll_delta_y;
 
