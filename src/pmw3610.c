@@ -608,6 +608,10 @@ void pmw3610_set_runtime_automouse_ms(const struct device *dev, uint32_t ms) {
     ARG_UNUSED(dev);
 #if AUTOMOUSE_LAYER > 0
     runtime_automouse_ms = ms;
+    if (ms == 0 && automouse_triggered) {
+        k_timer_stop(&automouse_layer_timer);
+        deactivate_automouse_layer(NULL);
+    }
 #else
     ARG_UNUSED(ms);
 #endif
@@ -674,7 +678,7 @@ static int pmw3610_report_data(const struct device *dev) {
     data->curr_mode = input_mode;
 
 #if AUTOMOUSE_LAYER > 0
-    if (input_mode == MOVE &&
+    if (input_mode == MOVE && runtime_automouse_ms > 0 &&
             (automouse_triggered || zmk_keymap_highest_layer_active() != AUTOMOUSE_LAYER)
     ) {
         activate_automouse_layer();
