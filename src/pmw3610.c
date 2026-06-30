@@ -19,6 +19,11 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(pmw3610, CONFIG_INPUT_LOG_LEVEL);
 
+/* kimi_gesture.c が提供するジェスチャーフック（weak）。
+ * リンクされていない場合は false を返すデフォルト実装が使われる。 */
+bool kimi_gesture_handle_delta(int16_t dx, int16_t dy) __attribute__((weak));
+bool kimi_gesture_handle_delta(int16_t dx, int16_t dy) { return false; }
+
 //////// Sensor initialization steps definition //////////
 // init is done in non-blocking manner (i.e., async), a //
 // delayable work is defined for this purpose           //
@@ -772,8 +777,12 @@ static int pmw3610_report_data(const struct device *dev) {
 
     if (x != 0 || y != 0) {
         if (input_mode != SCROLL) {
+            if (kimi_gesture_handle_delta((int16_t)x, (int16_t)y)) {
+                /* ジェスチャーが消費 → マウスイベントをスキップ */
+            } else {
             input_report_rel(dev, INPUT_REL_X, x, false, K_FOREVER);
             input_report_rel(dev, INPUT_REL_Y, y, true, K_FOREVER);
+            }
         } else {
             data->scroll_delta_x += x;
             data->scroll_delta_y += y;
