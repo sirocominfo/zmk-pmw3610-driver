@@ -20,6 +20,7 @@ struct kqe_config {
     struct gpio_dt_spec a;
     struct gpio_dt_spec b;
     uint32_t steps;
+    bool dummy;
 };
 
 struct kqe_data {
@@ -69,29 +70,21 @@ static inline int8_t kqe_decode(uint8_t old_state, uint8_t new_state) {
  * 読み終わるまで再開しないため、その窓の間に来たもう片方の変化を
  * 丸ごと取りこぼす。ここではその窓自体を作らない
  * （gpio_pin_interrupt_configure_dt は kqe_init で一度呼ぶだけで、以後呼ばない）。 */
-/* ★★★ 一時的な切り分け用ビルド（2026-08-26）★★★
- * 「割り込みを止める窓を無くしたのに、それでも半分しか反応しない」という実機結果を受けて、
- * ロス自体がこのドライバより下（nRF52本体のGPIO割り込み機構そのもの）で起きていないかを
- * 直接確認する。デコード処理を完全にバイパスし、A相の割り込みが呼ばれたら常に+1相当、
- * B相の割り込みが呼ばれたら常に-1相当として、そのままCW/CCWに割り振って発火させる。
- * 方向の意味は無視し、純粋に「A/Bそれぞれの割り込みハンドラが何回呼ばれたか」だけを見る。
- * 切り分け後は必ず 0 に戻し、通常のデコード経路（kqe_decode）を使うこと。 */
-#define KQE_RAW_EDGE_DIAG 1
-
+/* 2026-08-26：診断ビルド（A相/B相の割り込みが呼ばれたら常に固定値を返すモード）で
+ * 10クリック中10文字、"1212121212"と完全に交互かつ1:1で対応することを実機で確認した。
+ * これは「エッジを取りこぼしている」のではなく、**1クリックにつき電気的に1エッジしか
+ * 発生しない**（メーカー仕様の解釈が誤りで、24ディテント=24エッジだった）ことを意味する。
+ * よって通常のデコード経路（kqe_decode、標準のGray符号表）に戻す。steps は実測に合わせて
+ * ドライバ利用側（devicetreeのstepsプロパティ）を24にすること（48ではない）。 */
 static void kqe_handle_edge(const struct device *dev, int8_t raw_diag_delta) {
     const struct kqe_config *cfg = dev->config;
     struct kqe_data *data = dev->data;
+    ARG_UNUSED(raw_diag_delta);
 
     unsigned int key = irq_lock();
     uint8_t new_state = kqe_ab_state(cfg);
-#if KQE_RAW_EDGE_DIAG
-    ARG_UNUSED(new_state);
-    int8_t delta = raw_diag_delta;  /* デコードせず、呼ばれたこと自体をそのまま1発とする */
-    data->ab_state = kqe_ab_state(cfg);
-#else
     int8_t delta = kqe_decode(data->ab_state, new_state);
     data->ab_state = new_state;
-#endif
     data->pulses += delta;
     irq_unlock(key);
 
@@ -223,6 +216,16 @@ static int kqe_init(const struct device *dev) {
         return -EIO;
     }
 
+    /* dummy=true の場合は割り込みを一切張らない（呼び出し元がGPIOを実在の
+     * スイッチに繋がっていない旨を示した時に使う。詳細は下の DT_INST_FOREACH 側参照）。
+     * 完全に浮いたピン(内部プルアップのみで支えている未接続ピン)は電気的ノイズを
+     * 拾いやすく、割り込みを常時有効化したままだとノイズだけで連続発火し得る
+     * （実機で、centralのダミーエンコーダー経由と思われるキー入力の乱れを確認、2026-08-26）。
+     * ダミー用途では回転を検出する必要が無いので、そもそも割り込みを張らないのが最も安全。 */
+    if (cfg->dummy) {
+        return 0;
+    }
+
     /* 起動時に一度だけ有効化し、以後は運用中一切無効化しない。
      * ec11ドライバが持つ「変化のたびに止めて処理し終えたら戻す」窓を
      * 最初から作らないことが、このドライバの核心。 */
@@ -244,6 +247,7 @@ static int kqe_init(const struct device *dev) {
         .a = GPIO_DT_SPEC_INST_GET(n, a_gpios),                                                   \
         .b = GPIO_DT_SPEC_INST_GET(n, b_gpios),                                                   \
         .steps = DT_INST_PROP(n, steps),                                                          \
+        .dummy = DT_INST_PROP(n, dummy),                                                          \
     };                                                                                            \
     DEVICE_DT_INST_DEFINE(n, kqe_init, NULL, &kqe_data_##n, &kqe_cfg_##n, POST_KERNEL,            \
                           CONFIG_SENSOR_INIT_PRIORITY, &kqe_driver_api);

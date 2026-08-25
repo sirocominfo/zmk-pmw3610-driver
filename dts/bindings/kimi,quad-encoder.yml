@@ -31,3 +31,12 @@ properties:
     description: |
       1回転あたりのクアドラチャ・エッジ数（＝PPR×4）。
       alps,ec11 の steps プロパティと同じ意味・同じ換算。
+  dummy:
+    type: boolean
+    description: |
+      true にすると割り込みを一切張らない。split構成でcentral側に置く
+      「実際には配線されていないダミーノード」用（zmk,keymap-sensors の
+      ローカル登録要件とKconfig依存を満たすためだけに存在させる場合）。
+      a-gpios/b-gpios が完全に浮いた未接続ピンだと、割り込みを常時有効化する
+      このドライバの設計ではノイズを拾って連続発火しかねないため、
+      ダミー用途では最初から割り込みを張らないほうが安全。
