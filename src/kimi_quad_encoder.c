@@ -69,15 +69,30 @@ static inline int8_t kqe_decode(uint8_t old_state, uint8_t new_state) {
  * 読み終わるまで再開しないため、その窓の間に来たもう片方の変化を
  * 丸ごと取りこぼす。ここではその窓自体を作らない
  * （gpio_pin_interrupt_configure_dt は kqe_init で一度呼ぶだけで、以後呼ばない）。 */
-static void kqe_handle_edge(const struct device *dev) {
+/* ★★★ 一時的な切り分け用ビルド（2026-08-26）★★★
+ * 「割り込みを止める窓を無くしたのに、それでも半分しか反応しない」という実機結果を受けて、
+ * ロス自体がこのドライバより下（nRF52本体のGPIO割り込み機構そのもの）で起きていないかを
+ * 直接確認する。デコード処理を完全にバイパスし、A相の割り込みが呼ばれたら常に+1相当、
+ * B相の割り込みが呼ばれたら常に-1相当として、そのままCW/CCWに割り振って発火させる。
+ * 方向の意味は無視し、純粋に「A/Bそれぞれの割り込みハンドラが何回呼ばれたか」だけを見る。
+ * 切り分け後は必ず 0 に戻し、通常のデコード経路（kqe_decode）を使うこと。 */
+#define KQE_RAW_EDGE_DIAG 1
+
+static void kqe_handle_edge(const struct device *dev, int8_t raw_diag_delta) {
     const struct kqe_config *cfg = dev->config;
     struct kqe_data *data = dev->data;
 
     unsigned int key = irq_lock();
     uint8_t new_state = kqe_ab_state(cfg);
+#if KQE_RAW_EDGE_DIAG
+    ARG_UNUSED(new_state);
+    int8_t delta = raw_diag_delta;  /* デコードせず、呼ばれたこと自体をそのまま1発とする */
+    data->ab_state = kqe_ab_state(cfg);
+#else
     int8_t delta = kqe_decode(data->ab_state, new_state);
-    data->pulses += delta;
     data->ab_state = new_state;
+#endif
+    data->pulses += delta;
     irq_unlock(key);
 
     if (delta != 0) {
@@ -91,14 +106,14 @@ static void kqe_a_callback(const struct device *port, struct gpio_callback *cb, 
     ARG_UNUSED(port);
     ARG_UNUSED(pins);
     struct kqe_data *data = CONTAINER_OF(cb, struct kqe_data, a_cb);
-    kqe_handle_edge(data->dev);
+    kqe_handle_edge(data->dev, 1);
 }
 
 static void kqe_b_callback(const struct device *port, struct gpio_callback *cb, uint32_t pins) {
     ARG_UNUSED(port);
     ARG_UNUSED(pins);
     struct kqe_data *data = CONTAINER_OF(cb, struct kqe_data, b_cb);
-    kqe_handle_edge(data->dev);
+    kqe_handle_edge(data->dev, -1);
 }
 
 static void kqe_thread_fn(void *p1, void *p2, void *p3) {
