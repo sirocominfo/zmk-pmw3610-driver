@@ -164,3 +164,38 @@ module-str = PMW3610
 source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"
 
 endif #PMW3610
+
+menuconfig KIMI_QUAD_ENCODER
+    bool "Kimi custom quadrature rotary encoder driver"
+    default y
+    depends on DT_HAS_KIMI_QUAD_ENCODER_ENABLED
+    depends on GPIO
+    help
+      ZMK本体の標準EC11ドライバ(alps,ec11)は、A/Bどちらかの変化を検知すると
+      両方の割り込みを止め、読み終わるまで再開しない。ハーフステップ式
+      エンコーダー(例: ALPS EC10E1220501、24ディテント/12パルス)では、
+      片側のディテント遷移で2本の接点がごく短い間隔で切り替わるため、
+      その禁止窓の中にもう一方の変化が収まり丸ごと失われる
+      （実機で確認、専用スレッド化でも改善せず）。
+      このドライバは変化検知時にピンを読み演算するところまでを割り込み
+      コンテキストで完結させ、割り込み自体は起動後一切無効化しない。
+
+if KIMI_QUAD_ENCODER
+
+config KIMI_QUAD_ENCODER_THREAD_STACK_SIZE
+    int "Thread stack size"
+    default 768
+    help
+      ZMKへの報告(BLE通知まで到達しうる)だけを行う専用スレッドのスタックサイズ。
+
+config KIMI_QUAD_ENCODER_THREAD_PRIORITY
+    int "Thread priority (cooperative)"
+    default 0
+    help
+      協調的優先度。数値が小さいほど優先度が高い。
+
+module = KIMI_QUAD_ENCODER
+module-str = KIMI_QUAD_ENCODER
+source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"
+
+endif # KIMI_QUAD_ENCODER
