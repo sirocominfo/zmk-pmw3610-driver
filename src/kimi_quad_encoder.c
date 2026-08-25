@@ -109,17 +109,53 @@ static void kqe_b_callback(const struct device *port, struct gpio_callback *cb, 
     kqe_handle_edge(data->dev, -1);
 }
 
+/* ★★★ 一時的な切り分け用ビルド（2026-08-26）★★★
+ * nRF52のGPIO「エッジ両方」検知は真のエッジトリガーではなく、レベル検知＋
+ * 逆極性への再設定（ソフトウェア）で疑似的に実現している。この再設定が完了する前に
+ * ピンが素早く変化して戻ると、その変化を検知し損ねる可能性がある（既知の弱点）。
+ * 「悪い側」のディテントがこの隙間より速いのではないかを直接確認するため、
+ * 割り込みには一切頼らず、専用スレッドで両ピンを継続的にポーリングして
+ * 同じデコード表で処理する。低優先度(プリエンプティブル)で動かし、他のスレッドの
+ * 実行を妨げないようにする。これは電池を消費する一時的な検証用であり、
+ * 「24クリック全部を検知できるか」という問いに実測で答えるためのもの。
+ * 結果が分かり次第、割り込み駆動＋短時間ポーリングの省電力なハイブリッド設計に
+ * 作り直すか、あるいは（検知不能と分かれば）諦めるかを判断する。 */
+#define KQE_POLL_DIAG 1
+
 static void kqe_thread_fn(void *p1, void *p2, void *p3) {
     ARG_UNUSED(p2);
     ARG_UNUSED(p3);
     struct kqe_data *data = p1;
 
+#if KQE_POLL_DIAG
+    const struct device *dev = data->dev;
+    const struct kqe_config *cfg = dev->config;
+
+    while (1) {
+        uint8_t new_state = kqe_ab_state(cfg);
+        if (new_state != data->ab_state) {
+            unsigned int key = irq_lock();
+            bool changed = (new_state != data->ab_state);
+            int8_t delta = 0;
+            if (changed) {
+                delta = kqe_decode(data->ab_state, new_state);
+                data->ab_state = new_state;
+                data->pulses += delta;
+            }
+            irq_unlock(key);
+            if (delta != 0 && data->handler) {
+                data->handler(data->dev, data->trigger);
+            }
+        }
+    }
+#else
     while (1) {
         k_sem_take(&data->sem, K_FOREVER);
         if (data->handler) {
             data->handler(data->dev, data->trigger);
         }
     }
+#endif
 }
 
 static int kqe_sample_fetch(const struct device *dev, enum sensor_channel chan) {
@@ -200,10 +236,24 @@ static int kqe_init(const struct device *dev) {
 
     k_sem_init(&data->sem, 0, K_SEM_MAX_LIMIT);
 
-    k_thread_create(&data->thread, data->thread_stack,
-                    K_KERNEL_STACK_SIZEOF(data->thread_stack), kqe_thread_fn, data, NULL, NULL,
-                    K_PRIO_COOP(CONFIG_KIMI_QUAD_ENCODER_THREAD_PRIORITY), 0, K_NO_WAIT);
-    k_thread_name_set(&data->thread, "kqe");
+    /* dummyは実在のスイッチが無く継続ポーリングする意味が無いので、そもそも
+     * このスレッドを立てない（CPU・電池の無駄になるだけ）。 */
+    if (!cfg->dummy) {
+#if KQE_POLL_DIAG
+        /* 診断用の継続ポーリングは、他のスレッド（BLE・kscan等）を妨げないよう
+         * プリエンプティブル（横取り可能）な最低優先度で動かす。cooperative優先度
+         * だと自分から譲るまで他が動けず、前回のダミーエンコーダー暴発と同種の
+         * 問題を引き起こしかねないため、この診断では意図的に避ける。 */
+        k_thread_create(&data->thread, data->thread_stack,
+                        K_KERNEL_STACK_SIZEOF(data->thread_stack), kqe_thread_fn, data, NULL,
+                        NULL, K_PRIO_PREEMPT(CONFIG_NUM_PREEMPT_PRIORITIES - 1), 0, K_NO_WAIT);
+#else
+        k_thread_create(&data->thread, data->thread_stack,
+                        K_KERNEL_STACK_SIZEOF(data->thread_stack), kqe_thread_fn, data, NULL,
+                        NULL, K_PRIO_COOP(CONFIG_KIMI_QUAD_ENCODER_THREAD_PRIORITY), 0, K_NO_WAIT);
+#endif
+        k_thread_name_set(&data->thread, "kqe");
+    }
 
     gpio_init_callback(&data->a_cb, kqe_a_callback, BIT(cfg->a.pin));
     if (gpio_add_callback(cfg->a.port, &data->a_cb) < 0) {
