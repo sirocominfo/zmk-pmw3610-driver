@@ -631,6 +631,22 @@ uint32_t pmw3610_get_runtime_automouse_ms(const struct device *dev) {
 #endif
 }
 
+/* オートマウスレイヤーがアクティブな残り時間(ms)。Sirocom Studioのライブテストモードで
+ * カウントダウン表示するために使う。非アクティブ時は0を返す。
+ * k_timer_remaining_get() は「タイマーが動いていない/既に満了」の時0を返すので、
+ * automouse_triggered による判定と自然に一致する。 */
+uint32_t pmw3610_get_automouse_remaining_ms(const struct device *dev) {
+    ARG_UNUSED(dev);
+#if AUTOMOUSE_LAYER > 0
+    if (!automouse_triggered) {
+        return 0;
+    }
+    return k_timer_remaining_get(&automouse_layer_timer);
+#else
+    return 0;
+#endif
+}
+
 static enum pixart_input_mode get_input_mode_for_current_layer(const struct device *dev) {
     const struct pixart_config *config = dev->config;
     uint8_t curr_layer = zmk_keymap_highest_layer_active();
