@@ -104,6 +104,9 @@ uint32_t pmw3610_get_runtime_cpi(const struct device *dev);
 void pmw3610_set_runtime_automouse_ms(const struct device *dev, uint32_t ms);
 uint32_t pmw3610_get_runtime_automouse_ms(const struct device *dev);
 uint32_t pmw3610_get_automouse_remaining_ms(const struct device *dev);
+/* AMLへ入るのに必要な動き量（センサーカウント。0=従来どおり動き始めで入る）をランタイム変更する公開API */
+void pmw3610_set_runtime_automouse_threshold(const struct device *dev, uint32_t counts);
+uint32_t pmw3610_get_runtime_automouse_threshold(const struct device *dev);
 
 /* write command bit position */
 #define SPI_WRITE_BIT BIT(7)

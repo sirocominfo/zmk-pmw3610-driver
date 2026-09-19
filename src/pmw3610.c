@@ -593,6 +593,16 @@ static bool automouse_triggered = false;
 /* オートマウスレイヤーの待ち時間。既定はKconfig値。BLE経由でランタイム変更可能。 */
 static uint32_t runtime_automouse_ms = CONFIG_PMW3610_AUTOMOUSE_TIMEOUT_MS;
 
+/* AMLへ入るのに必要なトラックボールの動き量（センサーのカウント数=|dx|+|dy|の累積）。
+ * 0 = 従来どおり（動き始めた瞬間に入る）。大きいほど大きく動かさないと入らない。
+ * 手や机が触れた程度のわずかな動きで意図せずAMLに入るのを防ぐための設定。
+ * 既にAML中の再延長にはしきい値を使わない（動いている間は今まで通り維持する）。 */
+static uint32_t runtime_automouse_threshold = 0;
+/* 累積は「動きが途切れたらリセット」する（ゆっくりした微小なドリフトが溜まって誤って入るのを防ぐ）。 */
+#define AUTOMOUSE_ACCUM_WINDOW_MS 150
+static uint32_t automouse_accum = 0;
+static int64_t automouse_accum_ts = 0;
+
 static void activate_automouse_layer() {
     automouse_triggered = true;
     zmk_keymap_layer_activate(AUTOMOUSE_LAYER, false);
@@ -626,6 +636,26 @@ uint32_t pmw3610_get_runtime_automouse_ms(const struct device *dev) {
     ARG_UNUSED(dev);
 #if AUTOMOUSE_LAYER > 0
     return runtime_automouse_ms;
+#else
+    return 0;
+#endif
+}
+
+/* AML突入のしきい値（動き量）のランタイム変更API。AUTOMOUSE_LAYER 無効時は何もしない。 */
+void pmw3610_set_runtime_automouse_threshold(const struct device *dev, uint32_t counts) {
+    ARG_UNUSED(dev);
+#if AUTOMOUSE_LAYER > 0
+    runtime_automouse_threshold = counts;
+    automouse_accum = 0; /* 設定を変えたら溜まっている累積は捨てる */
+#else
+    ARG_UNUSED(counts);
+#endif
+}
+
+uint32_t pmw3610_get_runtime_automouse_threshold(const struct device *dev) {
+    ARG_UNUSED(dev);
+#if AUTOMOUSE_LAYER > 0
+    return runtime_automouse_threshold;
 #else
     return 0;
 #endif
@@ -699,8 +729,11 @@ static int pmw3610_report_data(const struct device *dev) {
     data->curr_mode = input_mode;
 
 #if AUTOMOUSE_LAYER > 0
+    /* しきい値0（既定）の時は従来どおり、動き始めた瞬間にAMLへ入る。しきい値>0の時は
+     * ここでは「既にAML中の再延長」だけを行い、新規の突入は下の累積判定（読み取り後）で行う。 */
     if (input_mode == MOVE && runtime_automouse_ms > 0 &&
-            (automouse_triggered || zmk_keymap_highest_layer_active() != AUTOMOUSE_LAYER)
+            (automouse_triggered ||
+             (runtime_automouse_threshold == 0 && zmk_keymap_highest_layer_active() != AUTOMOUSE_LAYER))
     ) {
         activate_automouse_layer();
     }
@@ -758,6 +791,26 @@ static int pmw3610_report_data(const struct device *dev) {
         x = ox;
         y = oy;
     }
+
+#if AUTOMOUSE_LAYER > 0
+    /* しきい値付きのAML突入：動き量(|dx|+|dy|)を累積し、しきい値に達したらAMLへ入る。
+     * 動きが AUTOMOUSE_ACCUM_WINDOW_MS 以上途切れたら累積をリセットする。
+     * （この判定は125Hz間引きの合算より前に置き、各サンプルの動きを取りこぼさない） */
+    if (runtime_automouse_threshold > 0 && input_mode == MOVE && runtime_automouse_ms > 0 &&
+            !automouse_triggered && zmk_keymap_highest_layer_active() != AUTOMOUSE_LAYER
+    ) {
+        int64_t now = k_uptime_get();
+        if (now - automouse_accum_ts > AUTOMOUSE_ACCUM_WINDOW_MS) {
+            automouse_accum = 0;
+        }
+        automouse_accum_ts = now;
+        automouse_accum += (uint32_t)(abs(x) + abs(y));
+        if (automouse_accum >= runtime_automouse_threshold) {
+            automouse_accum = 0;
+            activate_automouse_layer();
+        }
+    }
+#endif
 
 #ifdef CONFIG_PMW3610_SMART_ALGORITHM
     int16_t shutter =
