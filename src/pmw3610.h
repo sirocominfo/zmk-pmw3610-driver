@@ -107,6 +107,9 @@ uint32_t pmw3610_get_automouse_remaining_ms(const struct device *dev);
 /* AMLへ入るのに必要な動き量（センサーカウント。0=従来どおり動き始めで入る）をランタイム変更する公開API */
 void pmw3610_set_runtime_automouse_threshold(const struct device *dev, uint32_t counts);
 uint32_t pmw3610_get_runtime_automouse_threshold(const struct device *dev);
+/* スクロールレイヤーの慣性スクロール設定（有効/無効・開始しきい値[ticks/秒]・減衰時間[ms]）をランタイム変更する公開API */
+void pmw3610_set_runtime_inertia(const struct device *dev, bool enabled, uint32_t threshold_tps, uint32_t decay_ms);
+void pmw3610_get_runtime_inertia(const struct device *dev, bool *enabled, uint32_t *threshold_tps, uint32_t *decay_ms);
 
 /* write command bit position */
 #define SPI_WRITE_BIT BIT(7)

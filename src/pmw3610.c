@@ -14,6 +14,8 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/input/input.h>
 #include <zmk/keymap.h>
+#include <zmk/event_manager.h>
+#include <zmk/events/position_state_changed.h>
 #include "pmw3610.h"
 
 #include <zephyr/logging/log.h>
@@ -693,6 +695,158 @@ static enum pixart_input_mode get_input_mode_for_current_layer(const struct devi
     return MOVE;
 }
 
+/* ===== スクロールレイヤーの慣性スクロール =====
+ * スクロール中の「tickの発生ペース(ticks/秒)」を測り、ボールが止まった(=tickが途切れた)時点の
+ * 速度がしきい値以上なら、同じ軸・同じ向きのtickを減速しながら自動で出し続ける。
+ *   - 速度はtick間隔から求めた値の指数移動平均（減速しながら止めた時は遅い間隔が混ざり、慣性にならない）
+ *   - 減速は指数減衰（時定数=decay_ms/3 → decay_msでほぼ止まる）
+ *   - 新しい動き・キー押下・スクロールレイヤー解除・設定OFFで即座に止める
+ * 全て system workqueue 上で動くため（report_dataと同じ）排他は不要。
+ * 速度は ticks/秒 ×16 の固定小数点（_q16）で持つ。 */
+#define INERTIA_STEP_MS 10
+#define INERTIA_Q 16
+#define INERTIA_STOP_Q16 (2 * INERTIA_Q)   /* 2 ticks/秒を下回ったら停止 */
+#define INERTIA_IDLE_MIN_MS 50
+#define INERTIA_IDLE_MAX_MS 250
+#define INERTIA_TICK_GAP_MS 200            /* これ以上間が空いたら別のスクロール動作とみなす */
+
+static bool runtime_inertia_enabled = false;
+static uint32_t runtime_inertia_threshold = 12;  /* ticks/秒 */
+static uint32_t runtime_inertia_decay_ms = 800;
+
+static const struct device *inertia_dev;
+static struct k_work_delayable inertia_idle_work;
+static struct k_work_delayable inertia_step_work;
+static bool inertia_work_ready = false;
+static bool inertia_active = false;
+static uint16_t inertia_code;        /* INPUT_REL_WHEEL / INPUT_REL_HWHEEL */
+static int32_t inertia_val;          /* 出力したtickの値(±1) */
+static int32_t inertia_vel_q16;      /* 計測した速度 / 慣性中は現在の速度 */
+static int32_t inertia_acc;          /* 端数の繰り越し（1tick = 1000*INERTIA_Q） */
+static int64_t inertia_last_tick_ts;
+
+static void inertia_cancel(void) {
+    if (!inertia_work_ready) {
+        return;
+    }
+    inertia_active = false;
+    k_work_cancel_delayable(&inertia_idle_work);
+    k_work_cancel_delayable(&inertia_step_work);
+}
+
+/* 慣性の「再生」だけを止める（止まり検知タイマーは残す）。ボールが動くたびに呼ばれるため、
+ * ここで検知タイマーまで消すと、止める直前の細かい動きでタイマーが消えて慣性が始まらなくなる。 */
+static void inertia_stop_playback(void) {
+    if (!inertia_work_ready) {
+        return;
+    }
+    inertia_active = false;
+    k_work_cancel_delayable(&inertia_step_work);
+}
+
+static void inertia_step(struct k_work *work) {
+    ARG_UNUSED(work);
+    if (!inertia_active || !runtime_inertia_enabled || get_input_mode_for_current_layer(inertia_dev) != SCROLL) {
+        inertia_active = false;
+        return;
+    }
+    int32_t tau = (int32_t)(runtime_inertia_decay_ms / 3);
+    if (tau < 20) {
+        tau = 20;
+    }
+    int32_t dec = inertia_vel_q16 * INERTIA_STEP_MS / tau;
+    inertia_vel_q16 -= dec > 0 ? dec : 1;
+    if (inertia_vel_q16 < INERTIA_STOP_Q16) {
+        inertia_active = false;
+        return;
+    }
+    inertia_acc += inertia_vel_q16 * INERTIA_STEP_MS;
+    while (inertia_acc >= 1000 * INERTIA_Q) {
+        inertia_acc -= 1000 * INERTIA_Q;
+        input_report_rel(inertia_dev, inertia_code, inertia_val, true, K_FOREVER);
+    }
+    k_work_schedule(&inertia_step_work, K_MSEC(INERTIA_STEP_MS));
+}
+
+/* tickが途切れた（=ボールが止まった）時に呼ばれる。速度がしきい値以上なら慣性を開始。 */
+static void inertia_idle(struct k_work *work) {
+    ARG_UNUSED(work);
+    if (!runtime_inertia_enabled || inertia_vel_q16 < (int32_t)(runtime_inertia_threshold * INERTIA_Q) ||
+        get_input_mode_for_current_layer(inertia_dev) != SCROLL) {
+        return;
+    }
+    inertia_active = true;
+    inertia_acc = 0;
+    k_work_schedule(&inertia_step_work, K_MSEC(INERTIA_STEP_MS));
+}
+
+/* スクロールtickを1つ出した時に呼ぶ（速度の計測と、止まり検知のタイマー更新）。 */
+static void inertia_note_tick(const struct device *dev, uint16_t code, int32_t val) {
+    if (!runtime_inertia_enabled) {
+        return;
+    }
+    if (!inertia_work_ready) {
+        k_work_init_delayable(&inertia_idle_work, inertia_idle);
+        k_work_init_delayable(&inertia_step_work, inertia_step);
+        inertia_work_ready = true;
+    }
+    inertia_dev = dev;
+    int64_t now = k_uptime_get();
+    int64_t dt = now - inertia_last_tick_ts;
+    if (code != inertia_code || val != inertia_val || inertia_last_tick_ts == 0 || dt > INERTIA_TICK_GAP_MS) {
+        inertia_vel_q16 = 0; /* 軸・向きが変わった／間が空いた：測り直し */
+    } else {
+        if (dt < 1) {
+            dt = 1;
+        }
+        int32_t inst = (int32_t)(1000 * INERTIA_Q / dt);
+        inertia_vel_q16 = inertia_vel_q16 ? (inertia_vel_q16 + inst) / 2 : inst;
+    }
+    inertia_code = code;
+    inertia_val = val;
+    inertia_last_tick_ts = now;
+    if (inertia_vel_q16 >= (int32_t)(runtime_inertia_threshold * INERTIA_Q)) {
+        int32_t wait = 3 * 1000 * INERTIA_Q / 2 / inertia_vel_q16; /* tick間隔の1.5倍 */
+        if (wait < INERTIA_IDLE_MIN_MS) {
+            wait = INERTIA_IDLE_MIN_MS;
+        } else if (wait > INERTIA_IDLE_MAX_MS) {
+            wait = INERTIA_IDLE_MAX_MS;
+        }
+        k_work_reschedule(&inertia_idle_work, K_MSEC(wait));
+    } else {
+        k_work_cancel_delayable(&inertia_idle_work);
+    }
+}
+
+/* キーが押されたら慣性を止める（マウスボタンのクリック等で止めたい）。観測のみ。 */
+static int inertia_position_listener(const zmk_event_t *eh) {
+    const struct zmk_position_state_changed *ev = as_zmk_position_state_changed(eh);
+    if (ev != NULL && ev->state && inertia_active) {
+        inertia_stop_playback();
+    }
+    return ZMK_EV_EVENT_BUBBLE;
+}
+ZMK_LISTENER(pmw3610_inertia, inertia_position_listener);
+ZMK_SUBSCRIPTION(pmw3610_inertia, zmk_position_state_changed);
+
+/* 慣性スクロールのランタイム設定API。enabled=falseで即停止。 */
+void pmw3610_set_runtime_inertia(const struct device *dev, bool enabled, uint32_t threshold_tps, uint32_t decay_ms) {
+    ARG_UNUSED(dev);
+    runtime_inertia_enabled = enabled;
+    runtime_inertia_threshold = threshold_tps < 1 ? 1 : threshold_tps;
+    runtime_inertia_decay_ms = decay_ms < 100 ? 100 : decay_ms;
+    if (!enabled) {
+        inertia_cancel();
+    }
+}
+
+void pmw3610_get_runtime_inertia(const struct device *dev, bool *enabled, uint32_t *threshold_tps, uint32_t *decay_ms) {
+    ARG_UNUSED(dev);
+    *enabled = runtime_inertia_enabled;
+    *threshold_tps = runtime_inertia_threshold;
+    *decay_ms = runtime_inertia_decay_ms;
+}
+
 static int pmw3610_report_data(const struct device *dev) {
     struct pixart_data *data = dev->data;
     uint8_t buf[PMW3610_BURST_SIZE];
@@ -845,6 +999,7 @@ static int pmw3610_report_data(const struct device *dev) {
 #endif
 
     if (x != 0 || y != 0) {
+        inertia_stop_playback(); /* ボールが動いた＝再生中の慣性は止める */
         if (input_mode != SCROLL) {
             if (kimi_gesture_handle_delta((int16_t)x, (int16_t)y)) {
                 /* ジェスチャーが消費 → マウスイベントをスキップ */
@@ -856,15 +1011,15 @@ static int pmw3610_report_data(const struct device *dev) {
             data->scroll_delta_x += x;
             data->scroll_delta_y += y;
             if (abs(data->scroll_delta_y) > CONFIG_PMW3610_SCROLL_TICK) {
-                input_report_rel(dev, INPUT_REL_WHEEL,
-                                 data->scroll_delta_y > 0 ? PMW3610_SCROLL_Y_NEGATIVE : PMW3610_SCROLL_Y_POSITIVE,
-                                 true, K_FOREVER);
+                int32_t wv = data->scroll_delta_y > 0 ? PMW3610_SCROLL_Y_NEGATIVE : PMW3610_SCROLL_Y_POSITIVE;
+                input_report_rel(dev, INPUT_REL_WHEEL, wv, true, K_FOREVER);
+                inertia_note_tick(dev, INPUT_REL_WHEEL, wv);
                 data->scroll_delta_x = 0;
                 data->scroll_delta_y = 0;
             } else if (abs(data->scroll_delta_x) > CONFIG_PMW3610_SCROLL_TICK) {
-                input_report_rel(dev, INPUT_REL_HWHEEL,
-                                 data->scroll_delta_x > 0 ? PMW3610_SCROLL_X_NEGATIVE : PMW3610_SCROLL_X_POSITIVE,
-                                 true, K_FOREVER);
+                int32_t wv = data->scroll_delta_x > 0 ? PMW3610_SCROLL_X_NEGATIVE : PMW3610_SCROLL_X_POSITIVE;
+                input_report_rel(dev, INPUT_REL_HWHEEL, wv, true, K_FOREVER);
+                inertia_note_tick(dev, INPUT_REL_HWHEEL, wv);
                 data->scroll_delta_x = 0;
                 data->scroll_delta_y = 0;
             }
